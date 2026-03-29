@@ -323,11 +323,15 @@ class MarstekPVSensor(MarstekSensor):
         """Return the PV metric value."""
         if not self.coordinator.data:
             return None
-        value = self.coordinator.data.get(self._sensor_type)
-        if isinstance(value, (int, float)):
-            return cast(StateType, value)
-        return None
 
+        value = self.coordinator.data.get(self._sensor_type)
+        if not isinstance(value, (int, float)):
+            return None
+
+        if self._sensor_type == "pv1_power":
+            value = value / 10
+
+        return cast(StateType, value)
 
 async def async_setup_entry(
     hass: HomeAssistant,
