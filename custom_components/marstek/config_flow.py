@@ -45,6 +45,36 @@ class MarstekConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     discovered_devices: list[dict[str, Any]]
     _discovered_ip: str | None = None
 
+    def _normalized_mac(self, mac: str | None) -> str | None:
+        """Return normalized MAC or None."""
+        if not mac:
+            return None
+        try:
+            return format_mac(mac)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _entry_matches_mac(self, entry, discovered_mac: str) -> bool:
+        """Check whether a config entry matches the discovered MAC.
+
+        Compare against all known MAC-related fields because DHCP may report
+        WiFi MAC while the config entry unique_id may be based on BLE MAC.
+        """
+        candidates = [
+            entry.data.get("ble_mac"),
+            entry.data.get("mac"),
+            entry.data.get("wifi_mac"),
+            entry.unique_id,
+        ]
+
+        normalized_candidates = {
+            normalized
+            for candidate in candidates
+            if (normalized := self._normalized_mac(candidate)) is not None
+        }
+
+        return discovered_mac in normalized_candidates
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
@@ -176,8 +206,15 @@ class MarstekConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_dhcp(
         self, discovery_info: DhcpServiceInfo
     ) -> config_entries.ConfigFlowResult:
-        """Handle DHCP discovery to update IP address when it changes (mik-laj feedback)."""
-        mac = format_mac(discovery_info.macaddress)
+        """Handle DHCP discovery to update IP address when it changes."""
+        mac = self._normalized_mac(discovery_info.macaddress)
+        if not mac:
+            _LOGGER.warning(
+                "DHCP discovery ignored because MAC could not be normalized: %s",
+                discovery_info.macaddress,
+            )
+            return self.async_abort(reason="invalid_discovery_info")
+
         _LOGGER.info(
             "DHCP discovery triggered: MAC=%s, IP=%s, Hostname=%s",
             mac,
@@ -185,15 +222,9 @@ class MarstekConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             discovery_info.hostname,
         )
 
-        # Use BLE-MAC or MAC as unique_id (beardhatcode & mik-laj feedback)
-        # Try to find existing entry by MAC address
+        # Match against all known MACs of each existing entry
         for entry in self._async_current_entries(include_ignore=False):
-            entry_mac = (
-                entry.data.get("ble_mac")
-                or entry.data.get("mac")
-                or entry.data.get("wifi_mac")
-            )
-            if entry_mac and format_mac(entry_mac) == mac:
+            if self._entry_matches_mac(entry, mac):
                 # Found existing entry, update IP if it changed
                 if entry.data.get(CONF_HOST) != discovery_info.ip:
                     _LOGGER.info(
@@ -219,7 +250,10 @@ class MarstekConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_abort(reason="already_configured")
 
         # No existing entry found, continue with user flow
-        _LOGGER.debug("DHCP discovery: No existing entry found for MAC %s", mac)
+        _LOGGER.debug(
+            "DHCP discovery: No existing entry found for MAC %s, continuing to user flow",
+            mac,
+        )
         return await self.async_step_user()
 
     async def async_step_integration_discovery(
